@@ -1,17 +1,11 @@
 """
 Code generation service — mirrors the STRICT_CODE_PROMPT call from index.ts.
 Call 2: takes the vision description (+ optionally the image) and produces
-raw OpenSCAD code via Ollama.
+raw OpenSCAD code via Ollama qwen3-vl:8b.
 """
 import base64
 import httpx
 from config import get_settings
-
-
-def _auth_headers(api_key: str) -> dict:
-    if api_key:
-        return {"Authorization": f"Bearer {api_key}"}
-    return {}
 from prompts import STRICT_CODE_PROMPT
 from tools import strip_code_fences, extract_openscad_from_text
 
@@ -65,18 +59,14 @@ async def generate_scad_code(
         "stream": False,
         "options": {
             "temperature": 0.1,
-            # If CODE_MODEL is a Qwen3 model, thinking tokens count against num_predict.
-            # 32768 gives ~8-16k for reasoning + the remainder for actual OpenSCAD output.
-            # Non-thinking models (gemma, codellama, etc.) simply use it as a normal cap.
-            "num_predict": 32768,
+            "num_predict": 8192,
         },
     }
 
-    async with httpx.AsyncClient(timeout=600.0) as client:  # 10 min: thinking is slow
+    async with httpx.AsyncClient(timeout=300.0) as client:
         resp = await client.post(
             f"{settings.ollama_base_url}/api/chat",
             json=payload,
-            headers=_auth_headers(settings.ollama_api_key),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -113,14 +103,11 @@ async def generate_title(description: str, user_prompt: str) -> str:
             },
         ],
         "stream": False,
-        "options": {
-            "temperature": 0.3,
-            "num_predict": 512,  # titles are short; limit thinking waste for this call
-        },
+        "options": {"temperature": 0.3, "num_predict": 30},
     }
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{settings.ollama_base_url}/api/chat",
                 json=payload,

@@ -1,56 +1,13 @@
 """
-Agent service — routes the user request to the correct tool without any
-external LLM dependency.
-
-Two tools:
-  - apply_parameter_changes  → user wants to tweak a value in existing code
-  - build_parametric_model   → everything else (new model or structural change)
-
-The routing is rule-based:
-  1. If there is no base_code, it must be a new build.
-  2. If the prompt matches a "change X to Y" / "set X to N" pattern AND
-     the named variable actually exists in the current code → apply patch.
-  3. Otherwise → build.
+Agent service — mirrors the PARAMETRIC_AGENT_PROMPT call from index.ts.
+Uses OpenAI (gpt-4o) for reliable tool-calling.
+Returns the tool name + arguments chosen by the agent, plus its text reply.
 """
-import re
-from tools import parse_parameters
-
-# Patterns that signal a simple parameter tweak
-_PARAM_CHANGE_PATTERNS = [
-    # "change height to 80", "set radius to 5.5", "update wall_thickness to 3"
-    r"\b(?:change|set|update|make|adjust)\s+([\w_]+)\s+(?:to|=)\s*(-?[\d.]+)",
-    # "height = 80", "radius=5.5"
-    r"\b([\w_]+)\s*=\s*(-?[\d.]+)\b",
-    # "increase/decrease height by 10", "height to 80"
-    r"\b([\w_]+)\s+to\s+(-?[\d.]+)\b",
-]
-
-_COMPILED = [re.compile(p, re.IGNORECASE) for p in _PARAM_CHANGE_PATTERNS]
-
-
-def _extract_param_updates(prompt: str, base_code: str) -> list[dict] | None:
-    """
-    Try to extract {name, value} pairs from the prompt.
-    Only returns updates for variables that actually exist in base_code,
-    so we don't accidentally route a build request to the patcher.
-    """
-    existing = {p["name"] for p in parse_parameters(base_code)}
-    if not existing:
-        return None
-
-    updates = []
-    for pattern in _COMPILED:
-        for match in pattern.finditer(prompt):
-            name = match.group(1)
-            value = match.group(2)
-            if name in existing:
-                updates.append({"name": name, "value": value})
-
-    # Deduplicate by name (last match wins)
-    seen = {}
-    for u in updates:
-        seen[u["name"]] = u
-    return list(seen.values()) if seen else None
+import json
+from openai import AsyncOpenAI
+from config import get_settings
+from prompts import PARAMETRIC_AGENT_PROMPT
+from tools import TOOLS
 
 
 async def run_agent(
@@ -59,36 +16,64 @@ async def run_agent(
     base_code: str | None = None,
 ) -> dict:
     """
-    Decide which tool to call based on the user's request.
+    Run the agent call.
 
-    Returns:
+    Returns a dict with:
       {
-        "text":      <short reply for the UI>,
-        "tool_name": "build_parametric_model" | "apply_parameter_changes",
-        "tool_args": { ... }
+        "text":      <agent reply text>,
+        "tool_name": <"build_parametric_model" | "apply_parameter_changes" | None>,
+        "tool_args": <parsed dict of tool arguments | None>
       }
     """
-    # ── Rule 1: no existing code → must be a fresh build ─────────────────────
-    if not base_code:
-        return {
-            "text": f"Building a parametric model for: {user_text}",
-            "tool_name": "build_parametric_model",
-            "tool_args": {"text": user_text},
-        }
+    settings = get_settings()
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
 
-    # ── Rule 2: prompt looks like a parameter tweak AND named var exists ──────
-    updates = _extract_param_updates(user_text, base_code)
-    if updates:
-        names = ", ".join(u["name"] for u in updates)
-        return {
-            "text": f"Updating parameter(s): {names}.",
-            "tool_name": "apply_parameter_changes",
-            "tool_args": {"updates": updates},
-        }
+    # Build user content — include vision description if available
+    if vision_description:
+        user_content = (
+            f"{user_text}\n\n"
+            f"[Image Analysis for 3D modelling]\n{vision_description}"
+        )
+    else:
+        user_content = user_text
 
-    # ── Rule 3: everything else is a build / structural change ────────────────
+    messages = [
+        {"role": "system", "content": PARAMETRIC_AGENT_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+    # If we have existing code in context, include it as assistant turn
+    if base_code:
+        messages.insert(
+            2,
+            {"role": "assistant", "content": base_code},
+        )
+        messages.append({"role": "user", "content": user_content})
+
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages,
+        tools=TOOLS,
+        tool_choice="auto",
+        max_tokens=512,
+        temperature=0.3,
+    )
+
+    choice = response.choices[0]
+    agent_text = choice.message.content or ""
+    tool_name = None
+    tool_args = None
+
+    if choice.message.tool_calls:
+        tc = choice.message.tool_calls[0]
+        tool_name = tc.function.name
+        try:
+            tool_args = json.loads(tc.function.arguments)
+        except json.JSONDecodeError:
+            tool_args = {}
+
     return {
-        "text": f"Modifying the model: {user_text}",
-        "tool_name": "build_parametric_model",
-        "tool_args": {"text": user_text, "base_code": base_code},
+        "text": agent_text,
+        "tool_name": tool_name,
+        "tool_args": tool_args,
     }
