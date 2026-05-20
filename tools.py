@@ -4,66 +4,6 @@ Tool definitions (mirrored from index.ts) and OpenSCAD parameter parser.
 import re
 from typing import Any
 
-# ── OpenAI tool schemas ────────────────────────────────────────────────────────
-
-TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "build_parametric_model",
-            "description": (
-                "Generate or update an OpenSCAD model from user intent and context. "
-                "Include parameters and ensure the model is manifold and 3D-printable."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "User request for the model",
-                    },
-                    "base_code": {
-                        "type": "string",
-                        "description": "Existing OpenSCAD code to modify",
-                    },
-                    "error": {
-                        "type": "string",
-                        "description": "OpenSCAD error message to fix",
-                    },
-                },
-                "required": ["text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "apply_parameter_changes",
-            "description": (
-                "Apply simple parameter updates to the current artifact "
-                "without re-generating the whole model."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "updates": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "value": {"type": "string"},
-                            },
-                            "required": ["name", "value"],
-                        },
-                    }
-                },
-                "required": ["updates"],
-            },
-        },
-    },
-]
-
 # ── Parameter parser (mirrors parseParameter.ts) ──────────────────────────────
 
 _NUMBER_RE = re.compile(
