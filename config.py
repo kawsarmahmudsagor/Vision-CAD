@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     openai_api_key: str = ""
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = ""
     vision_model: str = ""
     code_model: str = ""
     output_dir: str = ""

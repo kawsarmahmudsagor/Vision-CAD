@@ -74,7 +74,7 @@ Orientation: Study the provided render images to determine the model's "up" dire
 - Apply rotation to orient the model so it sits FLAT on any stand/base
 - Always include rotation parameters so the user can fine-tune
 
-**Reference Example 1 — Pavé Milgrain Bridal Set (dual-band, white gold, no halo):**
+**Reference Example — Diamond Engagement Ring Set:**
 
 // Ring Dimensional Parameters
 ring_inner_diameter = 16.5;
@@ -260,160 +260,7 @@ module complete_ring_assembly() {
     }
 }
 
-
-**Reference Example 2 — Halo Engagement Ring (single band, rose gold, no milgrain):**
-
-// Dimensional Parameters
-ring_inner_diameter = 17.0;
-band_width = 5.5;
-band_wall_thickness = 1.8;
-center_stone_radius = 4.0;
-
-// Detail Density Parameters
-prong_count = 4;
-halo_stone_count = 12;
-pave_stones_per_row = 18;
-pave_row_count = 2;
-
-// Visual Materials
-metal_color = "#B76E79";
-gem_color = "#E0FFFF";
-
-// Derived Measurements
-inner_radius = ring_inner_diameter / 2;
-outer_radius = inner_radius + band_wall_thickness;
-halo_orbit_radius = center_stone_radius * 1.55;
-halo_stone_size   = center_stone_radius * 0.30;
-setting_height    = center_stone_radius * 1.6;
-prong_radius      = center_stone_radius * 0.10;
-
-complete_ring_assembly();
-
-module diamond_gem(stone_radius) {
-    color(gem_color)
-    union() {
-        translate([0, 0, stone_radius * 0.3])
-            cylinder(r1 = 0, r2 = stone_radius, h = stone_radius * 0.8, $fn = 32);
-        translate([0, 0, stone_radius * 1.1])
-            cylinder(r = stone_radius, h = stone_radius * 0.05, $fn = 32);
-        translate([0, 0, stone_radius * 1.15])
-            cylinder(r1 = stone_radius, r2 = stone_radius * 0.55, h = stone_radius * 0.35, $fn = 32);
-    }
-}
-
-module small_pave_gem(gem_radius) {
-    color(gem_color)
-    rotate([0, 45, 0])
-    cylinder(h = gem_radius * 2, r1 = 0, r2 = gem_radius * 1.2, center = true, $fn = 4);
-}
-
-module ring_band() {
-    color(metal_color)
-    difference() {
-        rotate_extrude($fn = 120)
-        translate([inner_radius, 0, 0])
-        hull() {
-            square([0.1, band_width - 0.5], center = true);
-            translate([band_wall_thickness - 0.5,  (band_width - 1) / 2, 0]) circle(r = 0.4, $fn = 24);
-            translate([band_wall_thickness - 0.5, -(band_width - 1) / 2, 0]) circle(r = 0.4, $fn = 24);
-        }
-        // Pave groove channels
-        for (row = [0 : pave_row_count - 1]) {
-            row_z = (row - (pave_row_count - 1) / 2.0) * (band_width / (pave_row_count + 1));
-            translate([0, 0, row_z])
-            difference() {
-                cylinder(r = outer_radius + 1,   h = 1.2, center = true, $fn = 80);
-                cylinder(r = outer_radius - 0.7, h = 1.5, center = true, $fn = 80);
-            }
-        }
-        // Seat hole where the stone tower meets the band top
-        // In pre-rotation space: ring top is at Y = +outer_radius, band center at Z = 0
-        translate([0, outer_radius, 0])
-        rotate([-90, 0, 0])
-        cylinder(r = center_stone_radius * 0.55, h = 3, center = true, $fn = 32);
-    }
-}
-
-module pave_shoulders() {
-    for (row = [0 : pave_row_count - 1]) {
-        row_z = (row - (pave_row_count - 1) / 2.0) * (band_width / (pave_row_count + 1));
-        for (i = [0 : pave_stones_per_row - 1]) {
-            angle = 5 + (i * (170.0 / (pave_stones_per_row - 1)));
-            // Skip the gap at the top (angle ~90°) where the stone setting sits
-            if (!(angle > 78 && angle < 102)) {
-                rotate([0, 0, angle])
-                translate([outer_radius - 0.2, 0, row_z])
-                small_pave_gem(0.6);
-            }
-        }
-    }
-}
-
-module halo_ring() {
-    halo_z = center_stone_radius * 0.55;
-    // Thin platform disk that seats the halo stones
-    color(metal_color)
-    translate([0, 0, halo_z - 0.4])
-    difference() {
-        cylinder(r = halo_orbit_radius + halo_stone_size * 1.3, h = 0.7, $fn = 64);
-        cylinder(r = center_stone_radius * 0.35,                h = 1.2, $fn = 32);
-    }
-    // Halo stones arranged in a full circle around the center stone
-    for (i = [0 : halo_stone_count - 1]) {
-        rotate([0, 0, i * (360 / halo_stone_count)])
-        translate([halo_orbit_radius, 0, halo_z])
-        diamond_gem(halo_stone_size);
-    }
-}
-
-module center_stone_setting() {
-    // Tulip base
-    color(metal_color)
-    cylinder(r1 = center_stone_radius * 0.5, r2 = center_stone_radius * 0.7,
-             h = setting_height * 0.35, $fn = 32);
-    // Prongs
-    color(metal_color)
-    for (i = [0 : prong_count - 1]) {
-        rotate([0, 0, i * (360 / prong_count)])
-        hull() {
-            translate([center_stone_radius * 0.45, 0, 0])
-                sphere(r = prong_radius, $fn = 16);
-            translate([center_stone_radius * 0.9, 0, setting_height])
-                sphere(r = prong_radius, $fn = 16);
-        }
-    }
-    // Gallery wire
-    color(metal_color)
-    translate([0, 0, setting_height * 0.65])
-    rotate_extrude($fn = 40)
-    translate([center_stone_radius * 0.78, 0, 0])
-    circle(r = prong_radius * 0.8, $fn = 16);
-    // Center stone
-    translate([0, 0, center_stone_radius * 0.45])
-    diamond_gem(center_stone_radius);
-    // Halo (shares the same local origin as the stone setting)
-    halo_ring();
-}
-
-module complete_ring_assembly() {
-    // rotate([90,0,0]) turns the ring from bore-along-Z into upright display orientation.
-    // INSIDE this rotate, the ring sits in the XY plane and its bore runs along Z.
-    // The outermost point of the band in that space is at Y = +outer_radius (not X, not Z).
-    // Therefore ALL stone settings must be translated to Y = +outer_radius and then
-    // counter-rotated with rotate([-90,0,0]) so the tower points radially outward —
-    // which becomes "straight up" after the outer rotate([90,0,0]).
-    rotate([90, 0, 0]) {
-        ring_band();
-        pave_shoulders();
-        // Stone sits on top of the band: Y = outer_radius, Z = 0 (band center)
-        translate([0, outer_radius, 0])
-        rotate([-90, 0, 0])
-        center_stone_setting();
-    }
-}
-
-
-**Reference Example 3 — a mug:**
+**Second Example — a mug:**
 
 // Mug parameters
 cup_height = 100;
@@ -462,8 +309,6 @@ Additionally, identify:
 - Material/color zones: which parts share the same color or material
 - Module decomposition: suggest how to break the object into modules (utility helpers, distinct parts, and a top-level assembly)
 - For rings/bands/tubes: note that the cross-section profile should be revolved using rotate_extrude, not stacked flat cylinders
-- For rings with a center stone: note whether a halo is present (ring of smaller stones surrounding the center stone),
-  and whether the band has pavé (small stones set into the band surface) or milgrain (tiny bead-chain texture on edges)
 
 Be precise and technical. Do NOT suggest code. Output only the description."""
 

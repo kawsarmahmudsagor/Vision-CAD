@@ -27,7 +27,7 @@ async def describe_image(image_bytes: bytes, media_type: str = "image/jpeg") -> 
             }
         ],
         "stream": False,
-        "options": {"temperature": 0.2},
+        "options": {"temperature": 0.1},
     }
 
     async with httpx.AsyncClient(timeout=120.0) as client:
