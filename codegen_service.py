@@ -1,8 +1,9 @@
 """
 Code generation service — mirrors the STRICT_CODE_PROMPT call from index.ts.
 Call 2: takes the vision description (+ optionally the image) and produces
-raw OpenSCAD code via Ollama qwen3-vl:8b.
+raw OpenSCAD code via Ollama.
 """
+import re
 import base64
 import httpx
 from config import get_settings
@@ -19,7 +20,7 @@ async def generate_scad_code(
     error: str | None = None,
 ) -> str:
     """
-    Call 2 — generate OpenSCAD code.
+    Call 2 — generate OpenSCAD code using Ollama.
 
     Sends STRICT_CODE_PROMPT as system, then a user message containing:
       - The vision description
@@ -29,24 +30,15 @@ async def generate_scad_code(
     """
     settings = get_settings()
 
-    # Build the user message content
     parts = [vision_description, "", f"User request: {user_prompt}"]
-
     if base_code:
         parts.append(f"\nExisting code to modify:\n{base_code}")
-
     if error:
         parts.append(f"\nFix this OpenSCAD error: {error}")
 
     user_text = "\n".join(parts)
 
-    # Build messages for Ollama /api/chat
-    user_message: dict = {
-        "role": "user",
-        "content": user_text,
-    }
-
-    # Attach image if available (qwen3-vl supports it)
+    user_message: dict = {"role": "user", "content": user_text}
     if image_bytes:
         user_message["images"] = [base64.b64encode(image_bytes).decode()]
 
@@ -57,11 +49,28 @@ async def generate_scad_code(
             user_message,
         ],
         "stream": False,
-        "options": {
-            "temperature": 0.1,
-            "num_predict": 8192,
-        },
+        "options": {"temperature": 0.1, "num_predict": 8192},
     }
+
+    async def parse_response(data: dict[str, object]) -> tuple[str, str]:
+        message = data.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+        else:
+            content = message
+
+        if not isinstance(content, str):
+            raise RuntimeError(
+                "Code generation response did not contain a valid text content field."
+            )
+
+        raw_text = content.strip()
+        code_text = strip_code_fences(raw_text).strip()
+        if not code_text or len(code_text) < 20:
+            fallback = extract_openscad_from_text(raw_text)
+            if fallback:
+                code_text = fallback
+        return code_text, raw_text
 
     async with httpx.AsyncClient(timeout=300.0) as client:
         resp = await client.post(
@@ -71,16 +80,41 @@ async def generate_scad_code(
         resp.raise_for_status()
         data = resp.json()
 
-    raw = data["message"]["content"].strip()
-
-    # Strip any markdown fences the model may have added despite instructions
-    code = strip_code_fences(raw).strip()
-
-    # If still looks wrapped, try the fallback extractor
+    code, raw = await parse_response(data)
     if not code or len(code) < 20:
-        fallback = extract_openscad_from_text(raw)
-        if fallback:
-            code = fallback
+        # Retry once with a stronger explicit instruction to return only code.
+        retry_message = {
+            "role": "user",
+            "content": (
+                user_text
+                + "\n\nReturn only valid OpenSCAD code. If you cannot, write ERROR."
+            ),
+        }
+        if "images" in user_message:
+            retry_message["images"] = user_message["images"]
+
+        retry_payload = {
+            "model": settings.code_model,
+            "messages": [
+                {"role": "system", "content": STRICT_CODE_PROMPT},
+                retry_message,
+            ],
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": 8192},
+        }
+        resp = await client.post(
+            f"{settings.ollama_base_url}/api/chat",
+            json=retry_payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        code, raw = await parse_response(data)
+
+    if not code or len(code) < 20:
+        snippet = raw.replace("\n", " ")[:500]
+        raise RuntimeError(
+            f"Code generation returned empty or invalid OpenSCAD code. Raw response snippet: {snippet}"
+        )
 
     return code
 
@@ -90,7 +124,6 @@ async def generate_title(description: str, user_prompt: str) -> str:
     Generate a short title for the 3D object using Ollama.
     """
     settings = get_settings()
-
     from prompts import TITLE_PROMPT
 
     payload = {
@@ -114,10 +147,8 @@ async def generate_title(description: str, user_prompt: str) -> str:
             )
             resp.raise_for_status()
             data = resp.json()
-        title = data["message"]["content"].strip()
-        # Clean up
-        title = title.strip('"\'').strip()
-        import re
+
+        title = data["message"]["content"].strip().strip("\"'").strip()
         title = re.sub(r"^title:\s*", "", title, flags=re.IGNORECASE)
         title = re.sub(r"[.!?:;,]+$", "", title).strip()
         if len(title) > 27:
@@ -125,3 +156,104 @@ async def generate_title(description: str, user_prompt: str) -> str:
         return title if len(title) >= 2 else "CAD Object"
     except Exception:
         return "CAD Object"
+
+
+async def refine_scad_code(
+    current_code: str,
+    visual_feedback: str,
+    vision_description: str,
+    user_prompt: str,
+) -> str:
+    """
+    Refine existing OpenSCAD code based on visual comparison feedback.
+
+    This is called during the iterative refinement loop. The vision model
+    has compared the rendered output to the input image and provided specific
+    feedback on what needs to change.
+
+    Args:
+        current_code: Current OpenSCAD code to modify.
+        visual_feedback: Feedback from vision model on what to change.
+        vision_description: Original description of the input image.
+        user_prompt: Original user request.
+
+    Returns:
+        Modified OpenSCAD code.
+    """
+    settings = get_settings()
+    from prompts import ITERATIVE_REFINEMENT_PROMPT
+
+    base_parts = [
+        ITERATIVE_REFINEMENT_PROMPT,
+        "",
+        f"Original image description: {vision_description}",
+        f"Original user request: {user_prompt}",
+        "",
+        "Current OpenSCAD code:",
+        current_code,
+        "",
+        "Visual feedback (what to change):",
+        visual_feedback,
+    ]
+
+    async def attempt_refinement(attempt_num: int = 1) -> str:
+        """Make one attempt to refine the SCAD code."""
+        if attempt_num > 1:
+            # On retry, add explicit instruction
+            parts = base_parts + [
+                "",
+                "Return ONLY valid OpenSCAD code. If you cannot generate valid code, return ERROR.",
+            ]
+        else:
+            parts = base_parts + ["", "Refined code:"]
+
+        user_text = "\n".join(parts)
+
+        payload = {
+            "model": settings.code_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": STRICT_CODE_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": user_text,
+                },
+            ],
+            "stream": False,
+            "options": {"temperature": 0.15 if attempt_num > 1 else 0.2, "num_predict": 8192},
+        }
+
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.post(
+                f"{settings.ollama_base_url}/api/chat",
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        raw = data["message"]["content"].strip()
+        code = strip_code_fences(raw).strip()
+
+        if not code or len(code) < 20:
+            fallback = extract_openscad_from_text(raw)
+            if fallback:
+                code = fallback
+
+        return code
+
+    # First attempt
+    code = await attempt_refinement(1)
+
+    # Retry if empty or invalid
+    if not code or len(code) < 20:
+        code = await attempt_refinement(2)
+
+    # Final validation
+    if not code or len(code) < 20:
+        raise RuntimeError(
+            f"Code refinement failed: could not generate valid OpenSCAD code after retries"
+        )
+
+    return code
