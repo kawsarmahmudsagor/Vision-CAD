@@ -22,44 +22,46 @@ from prompts import ITERATIVE_REFINEMENT_PROMPT
 def validate_scad_syntax(code: str) -> tuple[bool, str]:
     """
     Basic SCAD syntax validation to catch common errors.
-    
+
     Args:
         code: OpenSCAD code to validate.
-        
+
     Returns:
         (is_valid, error_message) tuple
     """
     if not code or len(code) < 10:
         return False, "Code is too short or empty"
-    
-    # Check for unclosed brackets
+
+    # Unbalanced brackets are a strong signal of truncated/broken output.
     open_parens = code.count("(") - code.count(")")
     open_braces = code.count("{") - code.count("}")
     open_brackets = code.count("[") - code.count("]")
-    
+
     if open_parens != 0:
         return False, f"Unbalanced parentheses: {open_parens} unclosed"
     if open_braces != 0:
         return False, f"Unbalanced braces: {open_braces} unclosed"
     if open_brackets != 0:
         return False, f"Unbalanced brackets: {open_brackets} unclosed"
-    
-    # Check for common OpenSCAD keywords at start (should have at least one)
-    has_module = re.search(r'\b(module|color|translate|rotate|scale|cube|sphere|cylinder)\b', code)
-    if not has_module:
+
+    # Must contain at least one real OpenSCAD object/operation.
+    has_object = re.search(
+        r"\b(module|function|color|translate|rotate|scale|mirror|resize|"
+        r"cube|sphere|cylinder|polyhedron|circle|square|polygon|text|"
+        r"union|difference|intersection|hull|minkowski|offset|"
+        r"linear_extrude|rotate_extrude|for|surface|import)\b",
+        code,
+    )
+    if not has_object:
         return False, "No OpenSCAD objects or modules found"
-    
-    # Check for orphaned semicolons that suggest incomplete statements
-    lines = code.split('\n')
-    for i, line in enumerate(lines, 1):
-        stripped = line.strip()
-        # Skip empty lines and comments
-        if not stripped or stripped.startswith('//'):
-            continue
-        # Check for lines that end with operators (incomplete statements)
-        if re.search(r'(=|\+|\-|\*|/|==|!=|<|>)\s*$', stripped):
-            return False, f"Incomplete statement on line {i}: {stripped[:50]}"
-    
+
+    # NOTE: the previous "incomplete statement" check (line ending in an
+    # operator) is intentionally removed. It false-flagged valid multi-line
+    # expressions such as:
+    #     x = a +
+    #         b;
+    # which are extremely common in generated OpenSCAD. Unbalanced-bracket
+    # detection above already catches genuinely truncated output.
     return True, ""
 
 
@@ -107,14 +109,27 @@ async def refine_until_satisfied(
                 "iteration": iteration,
                 "error": f"Syntax validation failed: {syntax_error}",
             })
-            # Request code fix for the syntax error
+            # Request a code fix for the syntax error — but never let a refiner
+            # failure abort the whole loop. If it can't help, stop and return
+            # the best code we already have.
             error_feedback = f"SCAD syntax error: {syntax_error}\nFix the code and try again."
-            current_scad = await refine_scad_code(
-                current_scad,
-                error_feedback,
-                vision_description,
-                user_prompt,
-            )
+            try:
+                new_scad = await refine_scad_code(
+                    current_scad,
+                    error_feedback,
+                    vision_description,
+                    user_prompt,
+                )
+            except Exception as e:
+                feedback_history.append({
+                    "iteration": iteration,
+                    "error": f"Refiner could not fix syntax: {e}",
+                })
+                break
+            if new_scad == current_scad:
+                # Refiner made no change — it can't fix this; stop looping.
+                break
+            current_scad = new_scad
             continue
 
         # --- Step 1: Render current SCAD to PNG ---
@@ -125,14 +140,24 @@ async def refine_until_satisfied(
                 "iteration": iteration,
                 "error": f"Render failed: {str(e)}",
             })
-            # Request code fix for the error
+            # Request a code fix for the render error, guarded the same way.
             error_feedback = f"OpenSCAD rendering failed: {str(e)}\nFix the syntax error and try again."
-            current_scad = await refine_scad_code(
-                current_scad,
-                error_feedback,
-                vision_description,
-                user_prompt,
-            )
+            try:
+                new_scad = await refine_scad_code(
+                    current_scad,
+                    error_feedback,
+                    vision_description,
+                    user_prompt,
+                )
+            except Exception as ce:
+                feedback_history.append({
+                    "iteration": iteration,
+                    "error": f"Refiner could not fix render error: {ce}",
+                })
+                break
+            if new_scad == current_scad:
+                break
+            current_scad = new_scad
             continue
 
         # Store render
@@ -168,7 +193,7 @@ async def refine_until_satisfied(
         feedback = comparison["feedback"] or comparison["raw_response"]
 
         try:
-            current_scad = await refine_scad_code(
+            new_scad = await refine_scad_code(
                 current_scad,
                 feedback,
                 vision_description,
@@ -179,9 +204,9 @@ async def refine_until_satisfied(
                 "iteration": iteration,
                 "error": f"Code generation failed: {str(e)}",
             })
-            # Try one more time with a simpler request
+            # Try one more time with a simpler request.
             try:
-                current_scad = await refine_scad_code(
+                new_scad = await refine_scad_code(
                     current_scad,
                     "Make a small adjustment: " + feedback[:100],
                     vision_description,
@@ -190,7 +215,12 @@ async def refine_until_satisfied(
             except Exception:
                 break
 
-    # Max iterations reached
+        if new_scad == current_scad:
+            # Refiner returned the code unchanged — no further progress possible.
+            break
+        current_scad = new_scad
+
+    # Max iterations reached (or loop stopped early). Return the best attempt.
     return {
         "final_scad_code": current_scad,
         "iterations": iteration,

@@ -178,7 +178,10 @@ async def refine_scad_code(
         user_prompt: Original user request.
 
     Returns:
-        Modified OpenSCAD code.
+        Modified OpenSCAD code. If the model cannot produce usable code after
+        retries, returns ``current_code`` unchanged (fail soft) so the caller
+        can stop refining and keep the best version it already has, rather than
+        aborting the whole request.
     """
     settings = get_settings()
     from prompts import ITERATIVE_REFINEMENT_PROMPT
@@ -199,10 +202,12 @@ async def refine_scad_code(
     async def attempt_refinement(attempt_num: int = 1) -> str:
         """Make one attempt to refine the SCAD code."""
         if attempt_num > 1:
-            # On retry, add explicit instruction
+            # On retry, be explicit but do NOT invite an "ERROR" sentinel —
+            # a literal "ERROR" reply is short enough to fail the length check
+            # and was a direct cause of spurious refinement failures.
             parts = base_parts + [
                 "",
-                "Return ONLY valid OpenSCAD code. If you cannot generate valid code, return ERROR.",
+                "Return ONLY the complete, valid OpenSCAD code — no prose, no markdown.",
             ]
         else:
             parts = base_parts + ["", "Refined code:"]
@@ -233,7 +238,9 @@ async def refine_scad_code(
             resp.raise_for_status()
             data = resp.json()
 
-        raw = data["message"]["content"].strip()
+        message = data.get("message")
+        content = message.get("content") if isinstance(message, dict) else message
+        raw = (content or "").strip() if isinstance(content, str) else ""
         code = strip_code_fences(raw).strip()
 
         if not code or len(code) < 20:
@@ -250,10 +257,11 @@ async def refine_scad_code(
     if not code or len(code) < 20:
         code = await attempt_refinement(2)
 
-    # Final validation
+    # Fail soft: if we still can't get usable code, keep the existing code
+    # rather than raising. The caller will detect the unchanged result, stop
+    # refining, and return the best version it already has — instead of
+    # aborting the whole request with "could not generate valid OpenSCAD code".
     if not code or len(code) < 20:
-        raise RuntimeError(
-            f"Code refinement failed: could not generate valid OpenSCAD code after retries"
-        )
+        return current_code
 
     return code
