@@ -1,47 +1,45 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Any
 
 
 class ParameterModel(BaseModel):
-    name: str
+    name:  str
     value: str | int | float | bool
-    type: str  # "number" | "boolean" | "string"
-
-
-class ArtifactModel(BaseModel):
-    title: str
-    version: str = "v1"
-    code: str
-    parameters: List[ParameterModel] = []
+    type:  str   # "number" | "boolean" | "string"
 
 
 class GenerateRequest(BaseModel):
-    """Request body for text-only generation (no image)."""
-    prompt: str
+    """Text-only generation (no image)."""
+    prompt:    str
     base_code: Optional[str] = None
-    error: Optional[str] = None
+    error:     Optional[str] = None
 
 
 class GenerateResponse(BaseModel):
-    title: str
-    scad_code: str
+    title:          str
+    scad_code:      str
     scad_file_path: str
-    parameters: List[ParameterModel] = []
-    description: str  # vision model output
-    message: str      # agent conversational reply
+    parameters:     List[ParameterModel] = []
+    description:    str   # vision model output
+    message:        str   # agent conversational reply
+    # New: geometry context and validation info (None when no COCO provided)
+    geometry_context:  Optional[dict] = None
+    constraints:       Optional[List[dict]] = None
+    validation_report: Optional[dict] = None
+    iterations:        int = 1
 
 
 class ParameterUpdate(BaseModel):
-    name: str
+    name:  str
     value: str
 
 
 class ApplyParametersRequest(BaseModel):
     scad_code: str
-    updates: List[ParameterUpdate]
+    updates:   List[ParameterUpdate]
 
 
 class ApplyParametersResponse(BaseModel):
-    scad_code: str
+    scad_code:      str
     scad_file_path: str
-    parameters: List[ParameterModel] = []
+    parameters:     List[ParameterModel] = []

@@ -74,7 +74,9 @@ Orientation: Study the provided render images to determine the model's "up" dire
 - Apply rotation to orient the model so it sits FLAT on any stand/base
 - Always include rotation parameters so the user can fine-tune
 
-**Reference Example 1 — Pavé Milgrain Bridal Set (dual-band, white gold, no halo):**
+**Style Reference Example 1 (few-shot — illustrates code structure and module patterns ONLY;
+do NOT copy its parameter values; use the GEOMETRY CONTEXT block for all real dimensions):**
+// Pavé Milgrain Bridal Set
 
 // Ring Dimensional Parameters
 ring_inner_diameter = 16.5;
@@ -413,7 +415,8 @@ module complete_ring_assembly() {
 }
 
 
-**Reference Example 3 — a mug:**
+**Style Reference Example 3 (few-shot — structural example for a non-ring object):**
+// A mug
 
 // Mug parameters
 cup_height = 100;
@@ -474,3 +477,27 @@ TITLE_PROMPT = """Generate a short title for a 3D object. Rules:
 - No quotes or special formatting
 - Examples: "Coffee Mug", "Gear Assembly", "Phone Stand"
 Respond with only the title."""
+
+VISION_SEMANTIC_PROMPT = """You are a jewelry design assistant analysing a ring image.
+Extract ONLY the semantic style attributes listed below. Do NOT estimate any numeric
+dimensions — those come from the annotation file, not from you.
+
+Respond with a raw JSON object only. No markdown fences. Schema:
+{
+  "ring_style":       "Solitaire" | "Cathedral" | "Halo" | "Three-Stone" | "Bypass" | "Cluster",
+  "setting_type":     "Prong" | "Bezel" | "Tension" | "Channel" | "Flush" | "Pave",
+  "center_stone_cut": "Round" | "Cushion" | "Princess" | "Oval" | "Pear" | "Marquise" | "Emerald" | "Radiant",
+  "shank_style":      "Pave" | "Plain" | "Split-Shank" | "Bypass" | "Tapered",
+  "shoulders":        "Pave" | "Plain" | "Cathedral",
+  "prong_count":      4 | 6 | 8,
+  "prong_style":      "claw" | "round_tip" | "flat" | "double_claw",
+  "symmetry":         "Bilateral" | "Radial" | "Asymmetrical"
+}
+
+Rules:
+- Do NOT include any numeric dimensions (diameters, heights, widths).
+- Do NOT include structural presence keys (halo, gallery, bridge) — those come from COCO.
+- prong_style: "claw" = tapered tip curving over girdle; "round_tip" = ball tip;
+               "flat" = flat tab; "double_claw" = forked tip.
+- Respond with valid JSON only.
+"""
