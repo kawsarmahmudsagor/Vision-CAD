@@ -8,17 +8,32 @@ Key change vs original:
   CONSTRAINTS block in addition to the prose description.  The LLM is
   instructed to treat these as ground truth and must encode them as OpenSCAD
   parameters verbatim — it must NOT invent its own dimensions.
+
+Resilience additions:
+  - generate_scad_code() retries the Ollama call up to MAX_CODEGEN_RETRIES
+    times on transient HTTP errors (502/503/504) and network failures,
+    with exponential backoff.  On total exhaustion it returns "" so the
+    caller can decide what to do rather than crashing the pipeline.
+  - generate_title() already had a bare try/except — unchanged.
 """
 
+import asyncio
 import base64
-import json
 import logging
+
 import httpx
+
 from config import get_settings
 from prompts import STRICT_CODE_PROMPT
 from tools import strip_code_fences, extract_openscad_from_text
 
 logger = logging.getLogger(__name__)
+
+# ── Retry config ──────────────────────────────────────────────────────────────
+MAX_CODEGEN_RETRIES  = 3      # total attempts (1 original + 2 retries)
+_RETRY_BASE_DELAY    = 2.0    # seconds; doubles each attempt
+# HTTP status codes that are worth retrying (transient upstream errors)
+_RETRYABLE_STATUSES  = {502, 503, 504}
 
 
 def _format_geometry_block(geo_ctx: dict | None, constraints: list | None) -> str:
@@ -84,6 +99,13 @@ def _format_geometry_block(geo_ctx: dict | None, constraints: list | None) -> st
             f"  prong_style  = {style.get('prong_style',  'claw')}",
         ]
 
+    # ── Semantic construction recipes ─────────────────────────────────────────
+    recipes = geo_ctx.get("_recipes")
+    if not recipes:
+        from semantic_recipe import build_semantic_recipes
+        recipes = build_semantic_recipes(geo_ctx)
+    lines.append(recipes)
+
     if constraints:
         lines += ["", "SPATIAL CONSTRAINTS (encode these as derived OpenSCAD parameters):"]
         for c in constraints:
@@ -111,30 +133,33 @@ def _format_adjustment_block(adjustments: dict | None) -> str:
 
 
 async def generate_scad_code(
-    user_prompt:       str,
+    user_prompt:        str,
     vision_description: str,
-    image_bytes:       bytes | None = None,
-    media_type:        str = "image/jpeg",
-    base_code:         str | None = None,
-    error:             str | None = None,
-    geo_ctx:           dict | None = None,
-    constraints:       list | None = None,
-    adjustments:       dict | None = None,
+    image_bytes:        bytes | None = None,
+    media_type:         str = "image/jpeg",
+    base_code:          str | None = None,
+    error:              str | None = None,
+    geo_ctx:            dict | None = None,
+    constraints:        list | None = None,
+    adjustments:        dict | None = None,
 ) -> str:
+    """
+    Generate OpenSCAD code via Ollama.
+
+    Returns the generated code string, or "" on total failure (all retries
+    exhausted).  Never raises — the caller handles the empty-string case.
+    """
     settings = get_settings()
 
-    geometry_block    = _format_geometry_block(geo_ctx, constraints)
-    adjustment_block  = _format_adjustment_block(adjustments)
+    geometry_block   = _format_geometry_block(geo_ctx, constraints)
+    adjustment_block = _format_adjustment_block(adjustments)
 
     parts = [vision_description, geometry_block]
-
     if adjustment_block:
         parts.append(adjustment_block)
     elif base_code:
         parts.append(f"\nExisting code to refine:\n{base_code}")
-
     parts.append(f"\nUser request: {user_prompt}")
-
     if error:
         parts.append(f"\nFix this OpenSCAD error: {error}")
 
@@ -154,15 +179,72 @@ async def generate_scad_code(
         "options": {"temperature": 0.1, "num_predict": 8192},
     }
 
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        resp = await client.post(f"{settings.ollama_base_url}/api/chat", json=payload)
-        resp.raise_for_status()
+    last_exc: Exception | None = None
 
-    raw  = resp.json()["message"]["content"].strip()
-    code = strip_code_fences(raw).strip()
-    if not code or len(code) < 20:
-        code = extract_openscad_from_text(raw) or code
-    return code
+    for attempt in range(1, MAX_CODEGEN_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                resp = await client.post(
+                    f"{settings.ollama_base_url}/api/chat", json=payload
+                )
+
+            # Retry on transient gateway / overload errors
+            if resp.status_code in _RETRYABLE_STATUSES:
+                raise httpx.HTTPStatusError(
+                    f"Upstream returned {resp.status_code}",
+                    request=resp.request,
+                    response=resp,
+                )
+
+            resp.raise_for_status()   # non-retryable 4xx → propagate immediately
+
+            raw  = resp.json()["message"]["content"].strip()
+            code = strip_code_fences(raw).strip()
+            if not code or len(code) < 20:
+                code = extract_openscad_from_text(raw) or code
+
+            if code and len(code) >= 20:
+                return code
+
+            # LLM returned something too short — log and retry
+            logger.warning(
+                f"[codegen attempt {attempt}/{MAX_CODEGEN_RETRIES}] "
+                f"Response too short ({len(code)} chars) — retrying"
+            )
+            last_exc = ValueError(f"Generated code too short: {len(code)} chars")
+
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else "?"
+            if status not in _RETRYABLE_STATUSES:
+                logger.error(f"[codegen] Non-retryable HTTP {status} — aborting")
+                return ""
+            logger.warning(
+                f"[codegen attempt {attempt}/{MAX_CODEGEN_RETRIES}] "
+                f"HTTP {status} from Ollama — retrying"
+            )
+            last_exc = exc
+
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            logger.warning(
+                f"[codegen attempt {attempt}/{MAX_CODEGEN_RETRIES}] "
+                f"Network error: {exc} — retrying"
+            )
+            last_exc = exc
+
+        except Exception as exc:
+            logger.error(f"[codegen] Unexpected error: {exc}")
+            return ""
+
+        # Exponential back-off before next attempt (skip after last)
+        if attempt < MAX_CODEGEN_RETRIES:
+            delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.info(f"[codegen] Waiting {delay:.1f}s before retry {attempt + 1}...")
+            await asyncio.sleep(delay)
+
+    logger.error(
+        f"[codegen] All {MAX_CODEGEN_RETRIES} attempts failed. Last error: {last_exc}"
+    )
+    return ""
 
 
 async def generate_title(description: str, user_prompt: str) -> str:

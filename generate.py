@@ -25,6 +25,15 @@ New pipeline (image + COCO path):
 
 Legacy endpoint (image only, no COCO) still works — skips steps 3-5 and
 the validation loop, behaving identically to the original Vision-CAD.
+
+Resilience additions vs original:
+  - Refinement loop never raises HTTPException mid-loop; bad codegen attempts
+    are retried inline (up to CODEGEN_EMPTY_RETRIES extra attempts) before
+    the loop continues with whatever previous-good code it has.
+  - A minimal fallback SCAD skeleton is returned instead of a 502 when all
+    attempts fail, so the client always receives a usable GenerateResponse.
+  - All sub-pipeline errors are caught and logged; the pipeline degrades
+    gracefully to the legacy path rather than 500-ing.
 """
 
 import logging
@@ -55,18 +64,85 @@ from validator import validate
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# How many times to retry codegen within a single loop iteration when it
+# returns empty/invalid code (on top of the retries already inside
+# generate_scad_code itself).
+CODEGEN_EMPTY_RETRIES = 2
+
+# Minimal fallback OpenSCAD returned when every attempt to generate real code
+# fails.  It is valid, renderable, and carries a clear comment so the user
+# knows something went wrong.
+_FALLBACK_SCAD = """\
+// Vision-CAD — fallback skeleton (code generation failed)
+// The upstream model did not return valid OpenSCAD.
+// Adjust the parameters below and regenerate.
+
+ring_inner_diameter = 17.0;
+band_width          = 3.0;
+band_thickness      = 1.8;
+metal_color         = "#C0C0C0";
+
+inner_radius = ring_inner_diameter / 2;
+outer_radius = inner_radius + band_thickness;
+
+color(metal_color)
+rotate_extrude($fn = 120)
+translate([inner_radius, 0, 0])
+square([band_thickness, band_width], center = true);
+"""
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-async def _build_model_with_coco(
-    user_prompt:   str,
+async def _safe_codegen(
+    *,
+    user_prompt: str,
     vision_description: str,
-    semantics:     dict,
-    image_bytes:   bytes | None,
-    media_type:    str,
-    coco_path:     str,
-    base_code:     str | None,
-    error:         str | None,
+    image_bytes: bytes | None,
+    media_type: str,
+    base_code: str | None,
+    error: str | None,
+    geo_ctx: dict | None,
+    constraints: list | None,
+    adjustments: dict | None,
+    iteration: int,
+) -> str | None:
+    """
+    Call generate_scad_code with per-iteration empty-result retries.
+    Returns the code string on success, or None if every attempt came back
+    empty (generate_scad_code already exhausted its own HTTP retries).
+    """
+    for attempt in range(1, CODEGEN_EMPTY_RETRIES + 2):  # +2: 1 original + N retries
+        code = await generate_scad_code(
+            user_prompt=user_prompt,
+            vision_description=vision_description,
+            image_bytes=image_bytes,
+            media_type=media_type,
+            base_code=base_code if iteration > 1 else None,
+            error=error,
+            geo_ctx=geo_ctx,
+            constraints=constraints,
+            adjustments=adjustments,
+        )
+        if code and len(code.strip()) >= 20:
+            return code
+        logger.warning(
+            f"[Iteration {iteration}, codegen attempt {attempt}] "
+            f"Empty/invalid code returned — "
+            f"{'retrying' if attempt <= CODEGEN_EMPTY_RETRIES else 'giving up'}"
+        )
+    return None
+
+
+async def _build_model_with_coco(
+    user_prompt:        str,
+    vision_description: str,
+    semantics:          dict,
+    image_bytes:        bytes | None,
+    media_type:         str,
+    coco_path:          str,
+    base_code:          str | None,
+    error:              str | None,
 ) -> GenerateResponse:
     """
     Full pipeline: COCO-informed geometry + constraint-first generation
@@ -118,29 +194,45 @@ async def _build_model_with_coco(
     effective_error  = tool_args.get("error", error)
 
     # ── 7. Refinement loop ────────────────────────────────────────────────────
-    scad_code        = base_code
+    scad_code         = base_code
+    last_good_code    = base_code       # track last successfully generated code
     validation_report = None
-    adjustments      = None
-    output_dir       = settings.output_dir
+    adjustments       = None
+    output_dir        = settings.output_dir
     os.makedirs(output_dir, exist_ok=True)
+    degraded          = False           # set True if we fell back to skeleton
 
     for iteration in range(1, settings.max_refinement_iterations + 1):
         logger.info(f"[Iteration {iteration}/{settings.max_refinement_iterations}] Generating OpenSCAD...")
 
-        scad_code = await generate_scad_code(
+        new_code = await _safe_codegen(
             user_prompt=effective_prompt,
             vision_description=vision_description or effective_prompt,
             image_bytes=image_bytes,
             media_type=media_type,
-            base_code=scad_code if iteration > 1 else None,
+            base_code=scad_code,
             error=effective_error,
             geo_ctx=geo_ctx,
             constraints=constraints,
             adjustments=adjustments,
+            iteration=iteration,
         )
 
-        if not scad_code or len(scad_code.strip()) < 20:
-            raise HTTPException(status_code=502, detail="Code generation returned invalid OpenSCAD.")
+        if new_code:
+            scad_code      = new_code
+            last_good_code = new_code
+        else:
+            logger.error(
+                f"[Iteration {iteration}] All codegen attempts returned empty. "
+                f"{'Using previous good code.' if last_good_code else 'Using fallback skeleton.'}"
+            )
+            if last_good_code:
+                scad_code = last_good_code
+            else:
+                scad_code = _FALLBACK_SCAD
+                degraded  = True
+            # No point running the validator on a skeleton — exit loop
+            break
 
         # Save to disk so renderer can read it
         tmp_title = f"ring_iter{iteration}"
@@ -169,10 +261,8 @@ async def _build_model_with_coco(
             break
 
         logger.info(f"[Iteration {iteration}] Adjustments: {adjustments}")
-        # Apply deltas to geo_ctx for next iteration
         for comp, params in adjustments.get("geometry", {}).items():
             for param_key, delta in params.items():
-                # Strip "_delta_mm" suffix to find the real param name
                 real_key = param_key.replace("_delta_mm", "_mm")
                 if comp in geo_ctx and real_key in geo_ctx[comp]:
                     geo_ctx[comp][real_key] = round(geo_ctx[comp][real_key] + delta, 3)
@@ -182,13 +272,20 @@ async def _build_model_with_coco(
     title     = await generate_title(vision_description or effective_prompt, effective_prompt)
     file_path = save_scad_file(scad_code, title)
 
+    status_msg = (
+        "⚠️ Code generation failed after all retries — returning a minimal skeleton. "
+        "Check the Ollama service and retry."
+        if degraded
+        else (agent_text or f"Generated parametric ring model: {title}")
+    )
+
     return GenerateResponse(
         title=title,
         scad_code=scad_code,
         scad_file_path=file_path,
         parameters=parse_parameters(scad_code),
         description=vision_description or "",
-        message=agent_text or f"Generated parametric ring model: {title}",
+        message=status_msg,
         geometry_context=geo_ctx,
         constraints=constraints,
         validation_report=validation_report,
@@ -206,7 +303,8 @@ async def _build_model_legacy(
 ) -> GenerateResponse:
     """
     Original single-pass pipeline — used when no COCO file is provided.
-    Behaviour identical to Vision-CAD v1.
+    Behaviour identical to Vision-CAD v1, but now returns a fallback skeleton
+    instead of raising a 502 when codegen fails.
     """
     agent_result = await run_agent(
         user_text=user_prompt,
@@ -239,15 +337,27 @@ async def _build_model_legacy(
         base_code=effective_base,
         error=effective_error,
     )
+
+    degraded = False
     if not scad_code or len(scad_code.strip()) < 20:
-        raise HTTPException(status_code=502, detail="Code generation returned empty or invalid OpenSCAD code.")
+        logger.error("Legacy pipeline: codegen returned empty code — using fallback skeleton")
+        scad_code = _FALLBACK_SCAD
+        degraded  = True
 
     title     = await generate_title(vision_description or effective_prompt, effective_prompt)
     file_path = save_scad_file(scad_code, title)
+
+    status_msg = (
+        "⚠️ Code generation failed after all retries — returning a minimal skeleton. "
+        "Check the Ollama service and retry."
+        if degraded
+        else (agent_text or f"Generated model: {title}")
+    )
+
     return GenerateResponse(
         title=title, scad_code=scad_code, scad_file_path=file_path,
         parameters=parse_parameters(scad_code), description=vision_description or "",
-        message=agent_text or f"Generated model: {title}",
+        message=status_msg,
     )
 
 
@@ -265,21 +375,25 @@ async def generate_from_image(
     Full pipeline:
     - With coco_path: COCO geometry extraction → constraint builder → generation → render → validate → refine
     - Without coco_path: original single-pass Vision-CAD behaviour
+    In both cases a valid GenerateResponse is always returned; a 502 is never
+    raised — failure information is surfaced in the `message` field instead.
     """
     image_bytes = await image.read()
     media_type  = image.content_type or "image/jpeg"
 
+    # Vision description — hard failure is still a 502 (the image itself is needed)
     try:
         vision_description = await describe_image(image_bytes, media_type)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Vision model error: {exc}")
 
-    # Extract structured semantics separately (new)
+    # Semantic extraction — soft failure (empty dict is fine)
     try:
         semantics = await extract_semantics(image_bytes, media_type)
     except Exception:
         semantics = {}
 
+    # Pipeline — always returns a GenerateResponse; never raises 502
     try:
         if coco_path and Path(coco_path).exists():
             return await _build_model_with_coco(
@@ -306,7 +420,18 @@ async def generate_from_image(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception(f"Unhandled pipeline error: {exc}")
+        # Last-resort: return the fallback skeleton rather than a 500
+        title     = "Ring Model"
+        file_path = save_scad_file(_FALLBACK_SCAD, title)
+        return GenerateResponse(
+            title=title,
+            scad_code=_FALLBACK_SCAD,
+            scad_file_path=file_path,
+            parameters=parse_parameters(_FALLBACK_SCAD),
+            description=vision_description or "",
+            message=f"⚠️ Unexpected pipeline error: {exc}. Returning fallback skeleton.",
+        )
 
 
 @router.post("/generate/text", response_model=GenerateResponse, summary="Generate SCAD from text only")
@@ -324,13 +449,23 @@ async def generate_from_text(body: GenerateRequest):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception(f"Text pipeline error: {exc}")
+        title     = "Ring Model"
+        file_path = save_scad_file(_FALLBACK_SCAD, title)
+        return GenerateResponse(
+            title=title,
+            scad_code=_FALLBACK_SCAD,
+            scad_file_path=file_path,
+            parameters=parse_parameters(_FALLBACK_SCAD),
+            description="",
+            message=f"⚠️ Unexpected pipeline error: {exc}. Returning fallback skeleton.",
+        )
 
 
 @router.post("/apply-parameters", response_model=ApplyParametersResponse, summary="Patch parameters in SCAD")
 async def apply_parameters(body: ApplyParametersRequest):
-    updates  = [u.model_dump() for u in body.updates]
-    patched  = apply_parameter_patch(body.scad_code, updates)
+    updates   = [u.model_dump() for u in body.updates]
+    patched   = apply_parameter_patch(body.scad_code, updates)
     file_path = save_scad_file(patched, "updated_model")
     return ApplyParametersResponse(
         scad_code=patched,
