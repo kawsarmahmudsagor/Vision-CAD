@@ -76,7 +76,8 @@ Orientation: Study the provided render images to determine the model's "up" dire
 - Apply rotation to orient the model so it sits FLAT on any stand/base
 - Always include rotation parameters so the user can fine-tune
 
-**Reference Example — Diamond Engagement Ring Set:**
+**Reference Example — Diamond Engagement Ring Set: EXAMPLE ONLY — do not reproduce this specific design**
+// EXAMPLE ONLY — do not reproduce this specific design
 
 // Ring Dimensional Parameters
 ring_inner_diameter = 16.5;
