@@ -447,28 +447,39 @@ module torus(r1, r2) {
     circle(r=r2);
 }"""
 
-VISION_DESCRIPTION_PROMPT = """You are a 3D modelling assistant. Analyse the provided image and describe it in detail
-specifically for the purpose of building a parametric 3D OpenSCAD model.
+VISION_DESCRIPTION_PROMPT = """You are a 3D modelling assistant specialised in jewellery rings.
+Analyse the provided ring image and describe it in precise technical detail for building a parametric OpenSCAD model.
 
-Include:
-- Overall shape and form factor
-- Key dimensions and proportions (relative if exact values are unknown)
-- Distinct parts or components and how they connect
-- Geometric primitives that best approximate each part (cylinder, cube, sphere, rotate_extrude with hull, etc.)
-- Any holes, cutouts, or negative space
-- Symmetry axes
-- Surface features relevant to 3D printing
+PART 1 — COMPONENT INVENTORY
+List every visible component:
+  band/shank, center stone, prongs, gallery/basket, bridge, halo stones, shoulder stones, side stones.
+For each component state: shape, approximate proportions, material/colour.
 
-Additionally, identify:
-- Dimensional parameters: the core measurements that define the object's size (e.g. inner diameter, thickness, height)
-- Detail density: counts of repeating decorative elements (e.g. number of prongs, stones, beads, spokes)
-- Material/color zones: which parts share the same color or material
-- Module decomposition: suggest how to break the object into modules (utility helpers, distinct parts, and a top-level assembly)
-- For rings/bands/tubes: note that the cross-section profile should be revolved using rotate_extrude, not stacked flat cylinders
-- For rings with a center stone: note whether a halo is present (ring of smaller stones surrounding the center stone),
-  and whether the band has pavé (small stones set into the band surface) or milgrain (tiny bead-chain texture on edges)
+PART 2 — CONNECTIVITY (most important section)
+Describe exactly how each component physically connects to the next, following the structural chain from bottom to top:
+  Example chain: band → bridge → gallery basket → [prongs + stone]
+  
+For EVERY ring with a center stone, describe:
+  - Does the band connect directly to the stone setting, or via a bridge/gallery?
+  - Do the prongs rise from a shared base/basket at the bottom of the stone, or from the band directly?
+  - Where do the prongs converge — at the stone base, or are they independent wires?
+  - In most rings WITHOUT a gallery annotation: prongs converge at a shared collar/basket
+    at the BOTTOM of the center stone, which then sits on top of the band.
+  - Does the setting sit flush on the band or is it elevated (cathedral arch)?
+  - If split-shank: where exactly does the band split, and what does each rail attach to?
+  - If halo: does the halo platform sit on the band top or on the gallery?
 
-Be precise and technical. Do NOT suggest code. Output only the description."""
+PART 3 — GEOMETRY DETAILS
+- Band cross-section shape (round, flat, tapered, D-profile)
+- Prong count, prong style (claw/hook tip, ball tip, flat tab, forked)
+- Stone cut silhouette
+- Any decorative elements on the band (pavé, milgrain, channel stones)
+
+PART 4 — MODULE DECOMPOSITION
+Suggest how to break this into OpenSCAD modules, naming the connection points:
+  e.g. ring_band() → stone_setting(outer_radius) → claw_prong(local_z)
+
+Be precise. Do NOT suggest code. Output only the description."""
 
 TITLE_PROMPT = """Generate a short title for a 3D object. Rules:
 - Maximum 25 characters
@@ -478,12 +489,34 @@ TITLE_PROMPT = """Generate a short title for a 3D object. Rules:
 - Examples: "Coffee Mug", "Gear Assembly", "Phone Stand"
 Respond with only the title."""
 
-VISION_SEMANTIC_PROMPT = """You are a jewelry design assistant analysing a ring image.
-Extract ONLY the semantic style attributes listed below. Do NOT estimate any numeric
-dimensions — those come from the annotation file, not from you.
+def _build_vision_semantic_prompt() -> str:
+    """
+    Build the VLM semantic-extraction prompt, injecting the full visual
+    knowledge base from semantic_knowledge.py.
 
-Respond with a raw JSON object only. No markdown fences. Schema:
-{
+    Kept as a function so the knowledge block is generated once at import
+    time but remains easy to regenerate if semantic_knowledge is updated.
+    """
+    from semantic_knowledge import build_full_semantics_block
+    knowledge_block = build_full_semantics_block()
+    return f"""You are a jewelry expert analysing a ring photograph.
+Your task is to classify the ring's style attributes ONLY from what you can
+SEE in the image. Do NOT estimate any numeric dimensions — those come from
+the annotation file, not from you.
+
+{knowledge_block}
+
+INSTRUCTIONS
+────────────
+1. Study the image carefully.
+2. Use the VISUAL IDENTIFICATION GUIDE above to match what you see to the
+   correct category for each attribute.
+3. Pay special attention to the IMAGE CUES listed for each option.
+4. Respond with a raw JSON object only — no markdown fences, no explanation.
+
+OUTPUT SCHEMA
+─────────────
+{{
   "ring_style":       "Solitaire" | "Cathedral" | "Halo" | "Three-Stone" | "Bypass" | "Cluster",
   "setting_type":     "Prong" | "Bezel" | "Tension" | "Channel" | "Flush" | "Pave",
   "center_stone_cut": "Round" | "Cushion" | "Princess" | "Oval" | "Pear" | "Marquise" | "Emerald" | "Radiant",
@@ -492,12 +525,15 @@ Respond with a raw JSON object only. No markdown fences. Schema:
   "prong_count":      4 | 6 | 8,
   "prong_style":      "claw" | "round_tip" | "flat" | "double_claw",
   "symmetry":         "Bilateral" | "Radial" | "Asymmetrical"
-}
+}}
 
-Rules:
-- Do NOT include any numeric dimensions (diameters, heights, widths).
-- Do NOT include structural presence keys (halo, gallery, bridge) — those come from COCO.
-- prong_style: "claw" = tapered tip curving over girdle; "round_tip" = ball tip;
-               "flat" = flat tab; "double_claw" = forked tip.
+RULES
+─────
+- Do NOT include numeric dimensions (diameters, heights, widths).
+- Do NOT include structural keys (halo, gallery, bridge) — those come from COCO.
+- Choose the best matching option from the schema values above.
 - Respond with valid JSON only.
 """
+
+
+VISION_SEMANTIC_PROMPT: str = _build_vision_semantic_prompt()

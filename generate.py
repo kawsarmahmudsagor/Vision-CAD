@@ -67,7 +67,7 @@ router = APIRouter()
 # How many times to retry codegen within a single loop iteration when it
 # returns empty/invalid code (on top of the retries already inside
 # generate_scad_code itself).
-CODEGEN_EMPTY_RETRIES = 2
+CODEGEN_EMPTY_RETRIES = 5
 
 # Minimal fallback OpenSCAD returned when every attempt to generate real code
 # fails.  It is valid, renderable, and carries a clear comment so the user

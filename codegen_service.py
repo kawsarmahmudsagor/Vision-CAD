@@ -30,7 +30,7 @@ from tools import strip_code_fences, extract_openscad_from_text
 logger = logging.getLogger(__name__)
 
 # ── Retry config ──────────────────────────────────────────────────────────────
-MAX_CODEGEN_RETRIES  = 3      # total attempts (1 original + 2 retries)
+MAX_CODEGEN_RETRIES  = 5      # total attempts (1 original + 2 retries)
 _RETRY_BASE_DELAY    = 2.0    # seconds; doubles each attempt
 # HTTP status codes that are worth retrying (transient upstream errors)
 _RETRYABLE_STATUSES  = {502, 503, 504}
@@ -41,6 +41,18 @@ def _format_geometry_block(geo_ctx: dict | None, constraints: list | None) -> st
     if not geo_ctx:
         return ""
 
+    band  = geo_ctx.get("band", {})
+    stone = geo_ctx.get("center_stone", {})
+    zs    = geo_ctx.get("z_stack", {})
+
+    inner_r    = band.get("inner_radius_mm", 8.5)
+    outer_r    = band.get("outer_radius_mm", 10.3)
+    band_thick = band.get("thickness_mm",    1.8)
+    band_width = band.get("width_mm",        2.5)
+    stone_w    = stone.get("width_mm",       6.0)
+    stone_h    = stone.get("height_mm",      3.8)
+    setting_h  = round(stone_h + 1.5, 3)
+
     lines = [
         "",
         "═══════════════════════════════════════════════════",
@@ -49,30 +61,42 @@ def _format_geometry_block(geo_ctx: dict | None, constraints: list | None) -> st
         "You MUST use them as your OpenSCAD parameter values.",
         "Do NOT invent or estimate any dimension listed here.",
         "═══════════════════════════════════════════════════",
-    ]
-
-    band  = geo_ctx.get("band", {})
-    stone = geo_ctx.get("center_stone", {})
-    zs    = geo_ctx.get("z_stack", {})
-
-    lines += [
-        f"",
-        f"BAND:",
-        f"  inner_radius     = {band.get('inner_radius_mm', 8.5)}  // mm",
-        f"  outer_radius     = {band.get('outer_radius_mm', 10.3)}  // mm",
-        f"  thickness        = {band.get('thickness_mm', 1.8)}  // mm",
-        f"  width            = {band.get('width_mm', 2.5)}  // mm (finger-axis depth)",
-        f"",
-        f"CENTER STONE:",
+        "",
+        "BAND:",
+        f"  inner_radius     = {inner_r}  // mm",
+        f"  outer_radius     = {outer_r}  // mm  (= inner_radius + thickness)",
+        f"  thickness        = {band_thick}  // mm  (radial wall)",
+        f"  width            = {band_width}  // mm  (finger-axis depth of band)",
+        "",
+        "CENTER STONE (all heights are LOCAL — 0 = pavilion tip, positive = upward):",
         f"  cut              = \"{stone.get('cut', 'round')}\"",
-        f"  width            = {stone.get('width_mm', 6.0)}  // mm (diameter for round)",
-        f"  height           = {stone.get('height_mm', 3.8)}  // mm (pavilion tip to table)",
-        f"  base_z           = {stone.get('base_z_mm', 10.3)}  // mm (world Z of pavilion tip)",
-        f"",
-        f"Z STACK (world Z, ring centre = 0):",
-        f"  band_top_z       = {zs.get('band_top_z', 10.3)}  // where band metal ends",
-        f"  stone_base_z     = {zs.get('stone_base_z', 10.3)}  // pavilion tip Z",
-        f"  stone_top_z      = {zs.get('stone_top_z', 14.1)}  // table Z",
+        f"  width            = {stone_w}  // mm",
+        f"  height           = {stone_h}  // mm  (local Z: 0 → {stone_h})",
+        f"  setting_height   = {setting_h}  // mm  (total module height incl. prong tips)",
+        "",
+        "═══════════════════════════════════════════════════",
+        "MANDATORY RING ASSEMBLY PATTERN",
+        "═══════════════════════════════════════════════════",
+        "The ring bore runs along Z. Wrap the full assembly in rotate([90,0,0])",
+        "so it displays upright. INSIDE that rotate block:",
+        "",
+        "  1. ring_band()   — rotate_extrude in XY plane, bore along Z",
+        "",
+        "  2. Stone setting — ALWAYS placed like this (NO exceptions):",
+        f"       translate([0, {outer_r}, 0])   // top of band in ring-local space",
+        "       rotate([-90, 0, 0])              // tip tower outward along +Y",
+        "       stone_setting_module();",
+        "",
+        "  Inside stone_setting_module(), ALL Z is LOCAL (0 = base, up = positive):",
+        f"       gallery / basket  : local Z  0  →  {round(stone_h*0.4,2)}",
+        f"       stone pavilion tip: local Z  0  (translate([0,0,0]))",
+        f"       stone table       : local Z  {stone_h}",
+        f"       prong tips        : local Z  {round(stone_h+0.8,2)}",
+        "",
+        "  NEVER use band_top_z, stone_base_z, or stone_top_z as absolute Z values.",
+        "  NEVER place the stone at translate([0,0,stone_base_z]) in the main assembly.",
+        "  ALL stone/prong heights are offsets from the base of stone_setting_module().",
+        "═══════════════════════════════════════════════════",
     ]
 
     for key in ("gallery", "prongs", "halo", "bridge"):

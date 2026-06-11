@@ -1,0 +1,33 @@
+{
+  "is_valid": false,
+  "metrics": {
+    "band": {
+      "detected_diameter_mm": 16.338,
+      "coco_diameter_mm": 20.6,
+      "error_mm": 4.262,
+      "iou": 0.793
+    },
+    "center_stone": {
+      "iou_top": 0.102,
+      "width_error_mm": 26.329,
+      "iou_side": 0.006,
+      "height_error_mm": 81.779,
+      "z_error_mm": 75.335
+    }
+  },
+  "adjustments": {
+    "geometry": {
+      "band": {
+        "thickness_delta_mm": 2.131
+      },
+      "center_stone": {
+        "height_delta_mm": -81.779,
+        "z_delta_mm": 75.335
+      }
+    }
+  },
+  "render_paths": {
+    "top": "outputs/ring_iter1_52a3c9ab_top.png",
+    "side": "outputs/ring_iter1_52a3c9ab_side.png"
+  }
+}

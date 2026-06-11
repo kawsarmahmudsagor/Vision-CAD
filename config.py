@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     side_image_id:   int = 0
 
     # Refinement loop
-    max_refinement_iterations: int = 3   # keep low for API latency
+    max_refinement_iterations: int = 10   # keep low for API latency
     iou_threshold:  float = 0.75
     max_error_mm:   float = 1.0
 

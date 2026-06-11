@@ -37,19 +37,55 @@ from __future__ import annotations
 _PRONG_RECIPES: dict[str, str] = {
 
     "claw": """\
-Claw prong — the standard tapered prong that curves inward over the stone girdle.
-OpenSCAD strategy:
-  1. Shaft: hull() of two spheres — base sphere at (radial_distance, 0, prong_base_z)
-     and a slightly smaller sphere at (radial_distance * 1.05, 0, stone_top_z * 0.75).
-  2. Tip: a third, smallest sphere at (radial_distance * 0.85, 0, stone_top_z + tip_overlap)
-     where tip_overlap ≈ prong_radius * 0.8. This inward-curving tip is what makes
-     it a "claw" — it hooks over the girdle rather than ending flush.
-  3. The tip sphere radius ≈ prong_radius * 0.9 (slightly thinner than the shaft).
-  4. Place all three spheres inside a single hull() — OpenSCAD will interpolate
-     the smooth curved form automatically.
-  5. Use for() loop: for (i = [0 : prong_count - 1]) rotate([0,0,angles_deg[i]])
-     to place each prong at its annotated angle.
-  Key parameter: tip_overlap = prong_radius * 0.8  // how far the tip crosses the girdle plane
+Claw prong — a slender tapered wire that rises from the band base and curves inward
+to hook over the stone girdle. This is the most common prong type.
+
+VISUAL: thin wire, visible from side, hooks inward at tip like a bird talon.
+
+CONNECTIVITY PATTERN (critical for correct assembly):
+  Prongs do NOT float independently. They converge/merge at the stone base.
+  The bottom of all prongs meet at a shared gallery basket or collar at the
+  base of the stone, which itself sits on top of the band.
+  Pattern:  band → gallery_basket → [prongs diverge outward] → stone girdle
+
+COORDINATE SYSTEM: all Z values below are LOCAL to stone_setting_module().
+  local Z = 0          → base of setting (where it attaches to band top)
+  local Z = stone_h    → stone table (top of gem)
+  local Z ≈ stone_h + 0.8 → prong tip (hooks over girdle)
+
+CRITICAL PROPORTIONS (enforce regardless of input):
+  prong_radius  = stone_radius * 0.10   // thin wire — max 0.12, never > 0.5mm abs
+  prong_radius  = max(prong_radius, 0.25)
+  radial_dist   = stone_radius * 0.95   // prong outside stone edge, touching girdle
+
+OpenSCAD strategy — TWO hull() calls, then union() (NEVER one hull of all 3):
+  shaft_top_z   = stone_h * 0.68        // local Z where shaft ends / hook begins
+  tip_z         = stone_h + 0.8         // local Z of hook tip (above table)
+  tip_inset     = prong_radius * 1.8    // radial inward pull of the hook
+
+  module claw_prong(angle_deg) {
+    rotate([0, 0, angle_deg])
+    color(metal_color)
+    union() {
+      // Shaft: straight section from base up to near stone table
+      hull() {
+        translate([radial_dist, 0, 0])
+          sphere(r = prong_radius, $fn = 16);
+        translate([radial_dist, 0, shaft_top_z])
+          sphere(r = prong_radius * 0.85, $fn = 16);
+      }
+      // Hook: curves inward over the girdle
+      hull() {
+        translate([radial_dist, 0, shaft_top_z])
+          sphere(r = prong_radius * 0.85, $fn = 16);
+        translate([radial_dist - tip_inset, 0, tip_z])
+          sphere(r = prong_radius * 0.70, $fn = 16);
+      }
+    }
+  }
+
+  for (a = prong_angles) claw_prong(a);
+  Result: thin wire with distinct inward hook — not a ball, not a column, not a fat blob.
 """,
 
     "round_tip": """\
@@ -195,9 +231,40 @@ OpenSCAD strategy: identical corner-chamfer approach to emerald cut, but
 _SETTING_RECIPES: dict[str, str] = {
 
     "Prong": """\
-Prong setting — stone held by individual metal wires (see prong_style recipe below).
-The seat under the stone is an open frame; light enters from all sides.
-Gallery structure: an open basket or tulip shape below the stone, not a solid bezel.
+Prong setting — stone held by individual metal wires rising from a shared base.
+
+CONNECTIVITY (how everything connects — follow this structure exactly):
+  band  →  gallery_basket  →  prongs diverge outward  →  stone girdle
+  The gallery basket is the SHARED ROOT of all prongs.
+  Without it, prongs float and the stone has no structural base.
+
+ALL Z values below are LOCAL (0 = base of stone_setting_module(), stone sits above):
+
+  module stone_setting_module() {
+    stone_radius  = stone_width / 2;
+    basket_h      = stone_height * 0.40;   // gallery height (local Z 0 → basket_h)
+    prong_r       = stone_radius * 0.10;   // thin wire radius
+
+    // 1. Gallery basket — connects prongs to band, gives setting structural base
+    //    Tapered frustum: wide at bottom (matches band), narrow at top (wraps stone)
+    color(metal_color)
+    difference() {
+      cylinder(r1 = stone_radius * 1.25, r2 = stone_radius * 0.85,
+               h = basket_h, $fn = 48);
+      translate([0, 0, -0.1])
+      cylinder(r1 = stone_radius * 0.85, r2 = stone_radius * 0.55,
+               h = basket_h + 0.2, $fn = 48);
+    }
+
+    // 2. Stone — pavilion tip at local Z=0, table at local Z=stone_height
+    translate([0, 0, 0])
+    stone_gem_module();
+
+    // 3. Prongs — base at local Z=0, tips hook over girdle at local Z≈stone_height+0.8
+    for (a = prong_angles) claw_prong(a);
+  }
+
+  Place this module at: translate([0, outer_radius, 0]) rotate([-90,0,0]) stone_setting_module();
 """,
 
     "Bezel": """\

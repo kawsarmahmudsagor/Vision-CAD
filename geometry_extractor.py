@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 _CLAMPS = {
     "stone_width":  (2.0,  20.0),
     "stone_height": (1.0,  15.0),
-    "prong_radius": (0.1,   1.5),
+    "prong_radius": (0.1,   0.7),
     "gallery_h":    (0.5,  20.0),
     "halo_stone":   (0.3,   3.0),
 }
@@ -139,15 +139,25 @@ def build_geometry_context(geometry: dict, semantics: dict) -> dict:
                            if prong_count == 4 else \
                            [round(i * step, 1) for i in range(prong_count)]
 
+        # Enforce jewellery-realistic proportions.
+        # A claw prong should be ~8-12% of stone radius — never a fat column.
+        stone_r = stone_width / 2.0
+        prong_radius = min(prong_radius, stone_r * 0.12)
+        prong_radius = max(prong_radius, 0.25)   # never thinner than 0.25 mm
+
+        # Prong base: always anchored at band_top_z so prongs rise from the
+        # band shoulder, not from mid-air (happens when no gallery annotated).
+        prong_base_z = round(band_top_z, 3)
+
         ctx["prongs"] = {
-            "count":            prong_count,
-            "radius_mm":        round(prong_radius, 3),
-            "height_mm":        round(stone_height + 1.0, 3),
-            "radial_distance_mm": round(stone_width / 2.0, 3),
-            "base_z_mm":        round(stone_base_z - 0.5, 3),
-            "angles_deg":       prong_angles,
-            "style":            semantics.get("prong_style", "claw"),
-            "orientation":      prong_g.get("orientation", "radial"),
+            "count":               prong_count,
+            "radius_mm":           round(prong_radius, 3),
+            "height_mm":           round(stone_height + 1.5, 3),
+            "radial_distance_mm":  round(stone_r + prong_radius * 0.6, 3),
+            "base_z_mm":           prong_base_z,
+            "angles_deg":          prong_angles,
+            "style":               semantics.get("prong_style", "claw"),
+            "orientation":         prong_g.get("orientation", "radial"),
         }
 
     # ── Bridge (if annotated) ─────────────────────────────────────────────────
